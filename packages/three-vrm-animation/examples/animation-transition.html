@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>VRM Animation Transition Example</title>
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no"
+		/>
+		<style>
+			body {
+				margin: 0;
+			}
+			canvas {
+				display: block;
+			}
+			#controls {
+				position: fixed;
+				top: 10px;
+				left: 10px;
+				background: rgba(0, 0, 0, 0.7);
+				color: white;
+				padding: 10px;
+				border-radius: 5px;
+			}
+			button {
+				padding: 5px 10px;
+				margin: 5px;
+			}
+		</style>
+	</head>
+
+	<body>
+		<div id="controls">
+			<button id="playAnim1">Play Animation 1</button>
+			<button id="playAnim2">Play Animation 2</button>
+			<div>
+				Transition Duration: <input type="range" id="duration" min="0" max="3" step="0.1" value="1.0">
+				<span id="durationValue">1.0</span>s
+			</div>
+		</div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+					"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
+					"@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.js",
+					"@pixiv/three-vrm-animation": "../lib/three-vrm-animation.module.js"
+				}
+			}
+		</script>
+
+		<script type="module">
+			import * as THREE from 'three';
+			import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+			import { createVRMAnimationClip, VRMAnimationLoaderPlugin } from '@pixiv/three-vrm-animation';
+
+			class AnimationController {
+				constructor(vrm) {
+					this.vrm = vrm;
+					this.mixer = new THREE.AnimationMixer(vrm.scene);
+					this.currentAction = null;
+					this.actions = new Map();
+				}
+
+				async loadAnimation(url) {
+					if (this.actions.has(url)) {
+						return this.actions.get(url);
+					}
+
+					const gltfVrma = await loader.loadAsync(url);
+					const clip = createVRMAnimationClip(gltfVrma.userData.vrmAnimations[0], this.vrm);
+					const action = this.mixer.clipAction(clip);
+					this.actions.set(url, action);
+
+					return action;
+				}
+
+				async crossFadeTo(url, duration = 1.0) {
+					const nextAction = await this.loadAnimation(url);
+
+					if (this.currentAction) {
+						nextAction.reset();
+						nextAction.setEffectiveTimeScale(1);
+						nextAction.setEffectiveWeight(1);
+						nextAction.play();
+
+						this.currentAction.crossFadeTo(nextAction, duration, true);
+					} else {
+						nextAction.play();
+					}
+
+					this.currentAction = nextAction;
+				}
+
+				update(deltaTime) {
+					this.mixer.update(deltaTime);
+					this.vrm.update(deltaTime);
+				}
+			}
+
+			// renderer
+			const renderer = new THREE.WebGLRenderer();
+			renderer.setSize(window.innerWidth, window.innerHeight);
+			renderer.setPixelRatio(window.devicePixelRatio);
+			document.body.appendChild(renderer.domElement);
+
+			// camera
+			const camera = new THREE.PerspectiveCamera(30.0, window.innerWidth / window.innerHeight, 0.1, 20.0);
+			camera.position.set(0.0, 1.0, 5.0);
+
+			// camera controls
+			const controls = new OrbitControls(camera, renderer.domElement);
+			controls.screenSpacePanning = true;
+			controls.target.set(0.0, 1.0, 0.0);
+			controls.update();
+
+			// scene
+			const scene = new THREE.Scene();
+
+			// light
+			const light = new THREE.DirectionalLight(0xffffff, Math.PI);
+			light.position.set(1.0, 1.0, 1.0).normalize();
+			scene.add(light);
+
+			// loader
+			const loader = new GLTFLoader();
+			loader.crossOrigin = 'anonymous';
+
+			loader.register((parser) => new VRMLoaderPlugin(parser));
+			loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+
+			// animation controller
+			let animationController = null;
+
+			// load VRM
+			loader.load(
+				'./models/VRM1_Constraint_Twist_Sample.vrm', // VRMモデルのパスを適切に設定してください
+				async (gltf) => {
+					const vrm = gltf.userData.vrm;
+
+					// モデルの最適化
+					VRMUtils.removeUnnecessaryVertices(gltf.scene);
+					VRMUtils.removeUnnecessaryJoints(gltf.scene);
+
+					// フラスタムカリングを無効化
+					vrm.scene.traverse((obj) => {
+						obj.frustumCulled = false;
+					});
+
+					// VRM0.0の場合は回転
+					VRMUtils.rotateVRM0(vrm);
+
+					scene.add(vrm.scene);
+
+					// アニメーションコントローラーの初期化
+					animationController = new AnimationController(vrm);
+
+					// UIの有効化
+					document.getElementById('playAnim1').disabled = false;
+					document.getElementById('playAnim2').disabled = false;
+				},
+				(progress) => console.log('Loading model...', 100.0 * (progress.loaded / progress.total), '%'),
+				(error) => console.error(error)
+			);
+
+			// helpers
+			const gridHelper = new THREE.GridHelper(10, 10);
+			scene.add(gridHelper);
+
+			const axesHelper = new THREE.AxesHelper(5);
+			scene.add(axesHelper);
+
+			// animation loop
+			const clock = new THREE.Clock();
+
+			function animate() {
+				requestAnimationFrame(animate);
+
+				const deltaTime = clock.getDelta();
+
+				if (animationController) {
+					animationController.update(deltaTime);
+				}
+
+				renderer.render(scene, camera);
+			}
+
+			animate();
+
+			// UI Controls
+			const durationSlider = document.getElementById('duration');
+			const durationValue = document.getElementById('durationValue');
+
+			durationSlider.addEventListener('input', (e) => {
+				durationValue.textContent = e.target.value;
+			});
+
+			document.getElementById('playAnim1').addEventListener('click', async () => {
+				if (animationController) {
+					const duration = parseFloat(durationSlider.value);
+					await animationController.crossFadeTo('./models/1.vrma', duration);
+				}
+			});
+
+			document.getElementById('playAnim2').addEventListener('click', async () => {
+				if (animationController) {
+					const duration = parseFloat(durationSlider.value);
+					await animationController.crossFadeTo('./models/2.vrma', duration);
+				}
+			});
+
+			// ウィンドウリサイズ対応
+			window.addEventListener('resize', () => {
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+				renderer.setSize(window.innerWidth, window.innerHeight);
+			});
+		</script>
+	</body>
+</html> 
